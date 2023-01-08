@@ -48,6 +48,82 @@ struct Config {
     wort_unit: String,
 }
 
+struct SpeidelConfig {
+    api_token: String,
+    machine_ids: Vec<String>, // TOOD: make decimal
+    host: String,
+}
+
+struct Machine {
+    id: String,
+    subscribe: Vec<String>,
+    publish: Vec<String>,
+}
+
+impl Machine {
+    fn new(id: String, subscribe: Vec<String>, publish: Vec<String>) -> Machine {
+	Machine { id, subscribe, publish }
+    }
+    fn qos(&self) -> Vec<i32> {
+	vec![0_i32; self.subscribe.len()]
+    }
+}
+
+impl SpeidelConfig {
+    fn new(host: String, api_token: String, machine_ids: Vec<String>) -> SpeidelConfig {
+	SpeidelConfig { api_token, machine_ids, host }
+    }
+}
+
+struct SpeidelClient {
+    cli: mqtt::AsyncClient,
+    machines: Vec<Machine>,
+}
+
+impl SpeidelClient {
+    fn new(mqtt: mqtt::AsyncClient, config: SpeidelConfig) -> SpeidelClient {
+	// set up machines for mqtt
+	let mut machines = vec![];
+	for id in config.machine_ids {
+	    let mut subscribe = vec![];
+	    let mut publish = vec![];
+
+	    for &prefix in PREFIX {
+		for &topic in TOPICS {
+		    if prefix == "cmnd" {
+			publish.push(format!("{}/{}/{}", prefix, id, topic));
+		    } else {
+			subscribe.push(format!("{}/{}/{}", prefix, id, topic));
+		    }
+		}
+	    }
+	    let m = Machine::new(id, subscribe, publish);
+	    machines.push(m);
+	}
+	
+    // Create the client. Use an ID for a persistent session.
+    // A real system should try harder to use a unique ID.
+    let create_opts = mqtt::CreateOptionsBuilder::new()
+        .server_uri(host)
+        .client_id("brau-exporter")
+        .finalize();
+
+    // Create the client connection
+    let mut cli = mqtt::AsyncClient::new(create_opts).unwrap_or_else(|e| {
+        println!("Error creating the client: {:?}", e);
+        process::exit(1);
+    });
+
+	SpeidelClient { cli: mqtt, machines }
+    }
+    fn initialise(&self) -> () {
+	for machine in self.machines {
+	    self.cli.subscribe_many(machine.subscribe.as_slice(), machine.qos().as_slice());
+	    println!("initialised braumeister: {}", machine.id)
+	}
+    }
+}
+
 fn main() {
     // Initialize the logger from the environment
     env_logger::init();
@@ -66,22 +142,6 @@ fn main() {
 	process::exit(1);
     });
 
-    let mut topics = vec![];
-    let mut commands = vec![];
-
-    for &prefix in PREFIX {
-	for &topic in TOPICS {
-	    if prefix == "cmnd" {
-		commands.push(format!("{}/{}/{}", prefix, machine_id, topic));
-	    } else {
-		topics.push(format!("{}/{}/{}", prefix, machine_id, topic));
-	    }
-	}
-    }
-
-    let qos = vec![0_i32; topics.len()];
-
-    print!("{:?}", topics);
 
 
     // Create the client. Use an ID for a persistent session.
@@ -97,9 +157,13 @@ fn main() {
         process::exit(1);
     });
 
+    let speidel_config = SpeidelConfig::new(host, token, vec![machine_id]);
+
+    let mut speidel = SpeidelClient::new(cli, speidel_config);
+
     if let Err(err) = block_on(async {
         // Get message stream before connecting.
-        let mut strm = cli.get_stream(25);
+        let mut strm = speidel.cli.get_stream(25);
 
         // Define the set of options for the connection
         let conn_opts = mqtt::ConnectOptionsBuilder::new()
@@ -113,7 +177,7 @@ fn main() {
 
         // Make the connection to the broker
         println!("Connecting to the MQTT server...");
-        cli.connect(conn_opts).await?;
+        speidel.cli.connect(conn_opts).await?;
 
         println!("Subscribing to topics: {:?}", TOPICS);
         cli.subscribe_many(&topics, qos.as_slice()).await?;
