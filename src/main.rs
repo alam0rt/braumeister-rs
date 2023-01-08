@@ -4,8 +4,12 @@ use std::{env, process, time::Duration};
 use serde::Deserialize;
 use serde_json::Value;
 
-// The topics to which we subscribe.
+// Stat seems to mean status, tele I have no idea and cmnd is command
+// Once a topic is subscribed to, you need to publish to the relevant "cmnd"
+// topic in order to get updates for it.
 const PREFIX: &[&str] = &["stat", "tele", "cmnd"];
+
+// The topics to which we subscribe.
 const TOPICS: &[&str] = &["machineinfo", "status", "config"];
 
 #[derive(Deserialize, Debug)]
@@ -21,7 +25,7 @@ struct MachineInfo {
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")] // for some reason the status data is returned in camelCase
 struct Status {
     device_state: String,
     full_tilt_information: Vec<String>,
