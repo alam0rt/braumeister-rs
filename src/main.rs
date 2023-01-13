@@ -1,8 +1,9 @@
 use futures::{executor::block_on, stream::StreamExt};
 use paho_mqtt as mqtt;
-use std::{env, process, time::Duration};
+use std::{env, process, time::Duration, error::Error};
 use serde::Deserialize;
 use serde_json::Value;
+use html_parser::{Dom, Result};
 
 // Stat seems to mean status, tele I have no idea and cmnd is command
 // Once a topic is subscribed to, you need to publish to the relevant "cmnd"
@@ -48,6 +49,37 @@ struct Config {
     wort_unit: String,
 }
 
+fn login(username: String, password: String) -> Result<()> {
+
+    let client = reqwest::blocking::ClientBuilder::new()
+        .cookie_store(true)
+        .gzip(true)
+        .build()
+        .unwrap();
+
+    let params = [("identity", username),("password", password), ("submit", "".to_string())];
+    client.post("https://www.myspeidel.com/auth/login")
+        .form(&params)
+        .send()
+        .unwrap();
+
+    println!("{:?}", &params);
+
+    let index = client.get("https://www.myspeidel.com/myspeidel/index")
+	.send()
+	.unwrap()
+	.text()
+	.unwrap();
+
+
+    let json = Dom::parse(index.as_str())?.to_json_pretty()?;
+
+    println!("{}", json);
+
+
+    Ok(())
+}
+
 fn main() {
     // Initialize the logger from the environment
     env_logger::init();
@@ -56,10 +88,23 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "wss://api.cloud.myspeidel.com:443".to_string());
 
-    let token = env::var("TOKEN").unwrap_or_else(|e| {
-	println!("The TOKEN environment variable must be provided: {:?}", e);
+    let token = env::var("SPEIDEL_TOKEN").unwrap_or_else(|e| {
+	println!("The SPEIDEL_TOKEN environment variable must be provided: {:?}", e);
 	process::exit(1);
     });
+
+    let username = env::var("SPEIDEL_USERNAME").unwrap_or_else(|e| {
+	println!("The SPEIDEL_USERNAME environment variable must be provided: {:?}", e);
+	process::exit(1);
+    });
+
+    let password = env::var("SPEIDEL_PASSWORD").unwrap_or_else(|e| {
+	println!("The SPEIDEL_PASSWORD environment variable must be provided: {:?}", e);
+	process::exit(1);
+    });
+
+    login(username, password);
+	
 
     let machine_id = env::var("MACHINE_ID").unwrap_or_else(|e| {
 	println!("The MACHINE_ID environment variable must be provided: {:?}", e);
@@ -133,7 +178,10 @@ fn main() {
 
         while let Some(msg_opt) = strm.next().await {
             if let Some(msg) = msg_opt {
-		let p: Value = serde_json::from_str(msg.payload_str().into_owned().as_str()).unwrap();
+		let p: Value = match serde_json::from_str(msg.payload_str().into_owned().as_str()) {
+		    Ok(v) => v,
+		    Err(e) => panic!("Recieved empty message, token may have expired: {e}"),
+		};
 		match p["topic"].as_str().unwrap() {
 		    "braumeister/machineinfo" => {
 			let m: MachineInfo = serde_json::from_str(p["body"].to_string().as_str()).unwrap();
