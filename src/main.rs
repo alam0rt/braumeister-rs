@@ -61,6 +61,7 @@ struct SpeidelClient {
     http_client: reqwest::blocking::Client,
 }
 
+#[derive(Debug, Clone)]
 struct Machine {
     api_token: Option<String>,
     name: String,
@@ -98,7 +99,7 @@ impl Machines {
     }
 
     fn build(&mut self, client: reqwest::blocking::Client) -> Result<()> {
-        for (id, machine) in self.0.iter() {
+        for (id, machine) in self.0.iter_mut() {
             let resp = client.get(format!(
                     "https://www.myspeidel.com/braumeister/control/{}",
                     id.to_string()
@@ -126,20 +127,11 @@ impl Machines {
         println!("{:?}", bmv2control_data);
 
             for config in bmv2control_data.iter() {
-                let machine_id = config["machineId"]
-                    .to_string()
-                    .chars()
-                    .filter(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse::<u64>()?;
-
-                let api_token = config["apiAuthToken"]
+                machine.api_token = Some(config["apiAuthToken"]
                     .to_string()
                     .chars()
                     .filter(|c| c.is_alphanumeric())
-                    .collect::<String>();
-
-
+                    .collect::<String>());
         }
     }
         Ok(())
@@ -210,8 +202,8 @@ impl SpeidelClient {
         match index.url().path() {
             "/auth/login" => panic!("Username or password is incorrect"),
             "/myspeidel/index" => {
-                self.machines.from_resp(index);
-                self.machines.build(self.http_client)
+                self.machines.from_resp(index).expect("unable to retrieve machines");
+                self.machines.build(self.http_client.clone()).expect("unable to retrieve API token");
             },
             _ => panic!("Unable to login for an unknown reason: {:?}", index),
         };
