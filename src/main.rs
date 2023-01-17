@@ -61,6 +61,7 @@ struct SpeidelClient {
 
 struct Machine {
     api_token: String,
+    name: String,
 }
 
 impl SpeidelClient {
@@ -82,8 +83,8 @@ impl SpeidelClient {
         })
     }
 
-    fn add_machine(&mut self, machine_id: u64, api_token: String) {
-        self.machines.insert(machine_id, Machine { api_token });
+    fn add_machine(&mut self, id: u64, api_token: String, name: String) {
+        self.machines.insert(id, Machine { api_token, name });
     }
 
     fn login(&mut self) -> Result<()> {
@@ -109,6 +110,7 @@ impl SpeidelClient {
 
                 for machine in doc.find(Class("device-list").descendant(Class("teaser-box-item"))) {
                     let machine_id = machine.attr("data-machine-id").unwrap();
+                    let machine_name = machine.attr("data-machine-name").unwrap();
 
                     let resp = self
                         .http_client
@@ -154,7 +156,7 @@ impl SpeidelClient {
                             .filter(|c| c.is_alphanumeric())
                             .collect::<String>();
 
-                        self.add_machine(machine_id, api_token);
+                        self.add_machine(machine_id, api_token, machine_name.to_string());
                     }
                 }
             }
