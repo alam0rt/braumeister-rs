@@ -1,12 +1,14 @@
 use futures::{executor::block_on, stream::StreamExt};
-use html_parser::{Dom, Result};
 use paho_mqtt as mqtt;
+use reqwest::Response;
 use select::document::{self, Document};
 use select::predicate::{Any, Attr, Class, Name, Predicate, Text};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::{env, error::Error, process, time::Duration};
+use std::error;
+use std::fmt;
+use std::{env, process, time::Duration};
 
 // Stat seems to mean status, tele I have no idea and cmnd is command
 // Once a topic is subscribed to, you need to publish to the relevant "cmnd"
@@ -55,13 +57,114 @@ struct Config {
 struct SpeidelClient {
     username: String,
     password: String,
-    machines: HashMap<u64, Machine>,
+    machines: Machines,
     http_client: reqwest::blocking::Client,
 }
 
 struct Machine {
-    api_token: String,
+    api_token: Option<String>,
     name: String,
+}
+
+struct Machines(HashMap<u64, Machine>);
+
+type Result<T> = std::result::Result<T, Box<dyn error::Error>>;
+
+#[derive(Debug, Clone)]
+struct LoginError;
+
+impl error::Error for LoginError {}
+
+impl fmt::Display for LoginError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Login failed")
+    }
+}
+
+impl Machines {
+    fn new() -> Machines {
+        Machines {
+            0: HashMap::<u64, Machine>::new(),
+        }
+    }
+    fn add_machine(&mut self, id: u64, name: String) {
+        self.0.insert(
+            id,
+            Machine {
+                api_token: None,
+                name,
+            },
+        );
+    }
+
+    fn build(&mut self, client: reqwest::blocking::Client) -> Result<()> {
+        for (id, machine) in self.0.iter() {
+            let resp = client.get(format!(
+                    "https://www.myspeidel.com/braumeister/control/{}",
+                    id.to_string()
+                ))
+                .send()?
+                .text()?;
+
+	       let doc = Document::from(resp.as_str());
+                    let bmv2control_data: Vec<Value> = doc
+                        .find(Name("script").descendant(Any))
+                        .filter(|script| script.text().contains("bmv2controlData"))
+                        .map(|script| {
+                            serde_json::from_str(
+                                script
+                                    .text()
+                                    .trim()
+                                    .strip_prefix("var bmv2controlData=")
+                                    .strip_suffix(';')
+                            )?
+                        })
+                        .collect();
+
+                    for config in bmv2control_data.iter() {
+                        let machine_id = config["machineId"]
+                            .to_string()
+                            .chars()
+                            .filter(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse::<u64>()?;
+
+                        let api_token = config["apiAuthToken"]
+                            .to_string()
+                            .chars()
+                            .filter(|c| c.is_alphanumeric())
+                            .collect::<String>();
+
+
+        }
+        Ok(())
+    }
+
+    fn from_resp(&mut self, index: reqwest::blocking::Response) -> Result<()> {
+        match index.url().path() {
+            "/auth/login" => return Err(LoginError.into()),
+            "/myspeidel/index" => {
+                let page = Document::from(index.text()?.as_str());
+
+                for machine in page.find(Class("device-list").descendant(Class("teaser-box-item")))
+                {
+                    let machine_id: u64 = machine
+                        .attr("data-machine-id")
+                        .ok_or::<LoginError>(LoginError.into())?
+                        .parse::<u64>()?;
+
+                    let machine_name = machine
+                        .attr("data-machine-name")
+                        .ok_or::<LoginError>(LoginError.into())?
+                        .to_string();
+
+                    self.add_machine(machine_id, machine_name);
+                    println!("added {machine_name} ({machine_id})");
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl SpeidelClient {
@@ -83,12 +186,9 @@ impl SpeidelClient {
         })
     }
 
-    fn add_machine(&mut self, id: u64, api_token: String, name: String) {
-        self.machines.insert(id, Machine { api_token, name });
-    }
-
     fn login(&mut self) -> Result<()> {
         let params = [("identity", &self.username), ("password", &self.password)];
+
 
         self.http_client
             .post("https://www.myspeidel.com/auth/login")
@@ -104,63 +204,7 @@ impl SpeidelClient {
 
         match index.url().path() {
             "/auth/login" => panic!("Username or password is incorrect"),
-            "/myspeidel/index" => {
-                let page = index.text().unwrap();
-                let doc = Document::from(page.as_str());
-
-                for machine in doc.find(Class("device-list").descendant(Class("teaser-box-item"))) {
-                    let machine_id = machine.attr("data-machine-id").unwrap();
-                    let machine_name = machine.attr("data-machine-name").unwrap();
-
-                    let resp = self
-                        .http_client
-                        .get(format!(
-                            "https://www.myspeidel.com/braumeister/control/{}",
-                            machine_id
-                        ))
-                        .send()
-                        .unwrap()
-                        .text()
-                        .unwrap();
-
-                    let doc = Document::from(resp.as_str());
-                    let bmv2control_data: Vec<Value> = doc
-                        .find(Name("script").descendant(Any))
-                        .filter(|script| script.text().contains("bmv2controlData"))
-                        .map(|script| {
-                            serde_json::from_str(
-                                script
-                                    .text()
-                                    .trim()
-                                    .strip_prefix("var bmv2controlData=")
-                                    .unwrap()
-                                    .strip_suffix(';')
-                                    .unwrap(),
-                            )
-                            .unwrap()
-                        })
-                        .collect();
-
-                    for config in bmv2control_data.iter() {
-                        let machine_id = config["machineId"]
-                            .to_string()
-                            .chars()
-                            .filter(|c| c.is_ascii_digit())
-                            .collect::<String>()
-                            .parse::<u64>()
-                            .unwrap();
-
-                        let api_token = config["apiAuthToken"]
-                            .to_string()
-                            .chars()
-                            .filter(|c| c.is_alphanumeric())
-                            .collect::<String>();
-
-                        self.add_machine(machine_id, api_token, machine_name.to_string());
-                    }
-                }
-            }
-
+            "/myspeidel/index" => self.machines.from_resp(index),
             _ => panic!("Unable to login for an unknown reason: {:?}", index),
         }
 
