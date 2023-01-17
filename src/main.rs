@@ -35,10 +35,10 @@ struct Status {
     full_tilt_information: Vec<String>,
     heating: u8,
     pump: u8,
-    pump_speed: f32,
-    sensor_pressure: f32,
+    pump_speed: Option<f32>,
+    sensor_pressure: Option<f32>,
     target_temperature: Option<f32>,
-    temperature: f32,
+    temperature: Option<f32>,
     version: String,
 }
 
@@ -55,49 +55,48 @@ struct Config {
 struct SpeidelClient {
     username: String,
     password: String,
-    machines: HashMap<String, Machine>,
+    machines: HashMap<u64, Machine>,
+    http_client: reqwest::blocking::Client,
 }
 
 struct Machine {
     api_token: String,
-    api_hostname: String,
 }
 
 impl SpeidelClient {
-    fn new(username: String, password: String) -> SpeidelClient {
-        SpeidelClient {
-            username,
-            password,
-            machines: HashMap::new(),
-        }
-    }
-
-    fn add_machine(&mut self, machine_id: String, api_token: String, api_hostname: String) {
-        self.machines.insert(
-            machine_id,
-            Machine {
-                api_token,
-                api_hostname,
-            },
-        );
-    }
-
-    fn login(&mut self) -> Result<()> {
-        let client = reqwest::blocking::ClientBuilder::new()
+    fn new(username: String, password: String) -> Result<SpeidelClient> {
+        let client = match reqwest::blocking::ClientBuilder::new()
             .cookie_store(true)
             .gzip(true)
             .build()
-            .unwrap();
+        {
+            Ok(client) => client,
+            Err(error) => panic!("Problem creating HTTP client: {:?}", error),
+        };
 
+        Ok(SpeidelClient {
+            username,
+            password,
+            machines: HashMap::new(),
+            http_client: client,
+        })
+    }
+
+    fn add_machine(&mut self, machine_id: u64, api_token: String) {
+        self.machines.insert(machine_id, Machine { api_token });
+    }
+
+    fn login(&mut self) -> Result<()> {
         let params = [("identity", &self.username), ("password", &self.password)];
 
-        client
+        self.http_client
             .post("https://www.myspeidel.com/auth/login")
             .form(&params)
             .send()
             .unwrap();
 
-        let index = client
+        let index = self
+            .http_client
             .get("https://www.myspeidel.com/myspeidel/index")
             .send()
             .unwrap();
@@ -111,7 +110,8 @@ impl SpeidelClient {
                 for machine in doc.find(Class("device-list").descendant(Class("teaser-box-item"))) {
                     let machine_id = machine.attr("data-machine-id").unwrap();
 
-                    let resp = client
+                    let resp = self
+                        .http_client
                         .get(format!(
                             "https://www.myspeidel.com/braumeister/control/{}",
                             machine_id
@@ -140,10 +140,21 @@ impl SpeidelClient {
                         .collect();
 
                     for config in bmv2control_data.iter() {
-                        let machine_id = config["machineId"].to_string();
-                        let api_token = config["apiAuthToken"].to_string();
-                        let api_hostname = config["apiHostName"].to_string();
-                        self.add_machine(machine_id, api_token, api_hostname)
+                        let machine_id = config["machineId"]
+                            .to_string()
+                            .chars()
+                            .filter(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse::<u64>()
+                            .unwrap();
+
+                        let api_token = config["apiAuthToken"]
+                            .to_string()
+                            .chars()
+                            .filter(|c| c.is_alphanumeric())
+                            .collect::<String>();
+
+                        self.add_machine(machine_id, api_token);
                     }
                 }
             }
@@ -179,14 +190,21 @@ fn main() {
         process::exit(1);
     });
 
-    let mut s = SpeidelClient::new(username, password);
-    s.login();
+    let mut s = SpeidelClient::new(username, password).unwrap_or_else(|e| {
+        println!("Unable to build the Speidel client: {:?}", e);
+        process::exit(1);
+    });
+
+    s.login().unwrap_or_else(|e| {
+        println!("Unable to login to MySpeidel: {:?}", e);
+        process::exit(1);
+    });
 
     let mut machine_id = String::new();
     let mut api_token = String::new();
-    for m in &s.machines.into_keys().into_iter() {
-        machine_id = m;
-        api_token = s.machines.get(&m).unwrap().api_token;
+    for (k, v) in s.machines.iter() {
+        machine_id = k.to_string();
+        api_token = v.api_token.to_string();
     }
 
     let mut topics = vec![];
@@ -254,9 +272,19 @@ fn main() {
 
         while let Some(msg_opt) = strm.next().await {
             if let Some(msg) = msg_opt {
-                let p: Value = match serde_json::from_str(msg.payload_str().into_owned().as_str()) {
+                let payload = msg.payload_str().into_owned();
+
+                if payload.clone().as_str().eq("") {
+                    println!("{}: recieved empty message", msg.topic());
+                    continue;
+                }
+
+                let p: Value = match serde_json::from_str(payload.as_str()) {
                     Ok(v) => v,
-                    Err(e) => panic!("Recieved empty message, token may have expired: {e}"),
+                    Err(e) => {
+                        println!("Unable to unmarshal message: {:?}", e);
+                        continue;
+                    }
                 };
                 match p["topic"].as_str().unwrap() {
                     "braumeister/machineinfo" => {
