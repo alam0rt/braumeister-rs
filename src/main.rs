@@ -107,36 +107,41 @@ impl Machines {
                 .text()?;
 
 	       let doc = Document::from(resp.as_str());
-                    let bmv2control_data: Vec<Value> = doc
-                        .find(Name("script").descendant(Any))
-                        .filter(|script| script.text().contains("bmv2controlData"))
-                        .map(|script| {
-                            serde_json::from_str(
-                                script
-                                    .text()
-                                    .trim()
-                                    .strip_prefix("var bmv2controlData=")
-                                    .strip_suffix(';')
-                            )?
-                        })
-                        .collect();
+            let bmv2control_data: Vec<Value> = doc
+                .find(Name("script").descendant(Any))
+                .filter(|script| script.text().contains("bmv2controlData"))
+                .map(|script| {
+                    serde_json::from_str(
+                        script
+                            .text()
+                            .trim()
+                            .strip_prefix("var bmv2controlData=")
+                            .expect("bmv2controlData is in an unexpected format")
+                            .strip_suffix(';')
+                            .expect("bmv2controlData is in an unexpected format")
+                    ).expect("unable to unmarshal bmv2controlData")
+                })
+                .collect();
 
-                    for config in bmv2control_data.iter() {
-                        let machine_id = config["machineId"]
-                            .to_string()
-                            .chars()
-                            .filter(|c| c.is_ascii_digit())
-                            .collect::<String>()
-                            .parse::<u64>()?;
+        println!("{:?}", bmv2control_data);
 
-                        let api_token = config["apiAuthToken"]
-                            .to_string()
-                            .chars()
-                            .filter(|c| c.is_alphanumeric())
-                            .collect::<String>();
+            for config in bmv2control_data.iter() {
+                let machine_id = config["machineId"]
+                    .to_string()
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse::<u64>()?;
+
+                let api_token = config["apiAuthToken"]
+                    .to_string()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>();
 
 
         }
+    }
         Ok(())
     }
 
@@ -155,14 +160,14 @@ impl Machines {
 
                     let machine_name = machine
                         .attr("data-machine-name")
-                        .ok_or::<LoginError>(LoginError.into())?
-                        .to_string();
+                        .ok_or::<LoginError>(LoginError.into())?;
 
-                    self.add_machine(machine_id, machine_name);
+                    self.add_machine(machine_id, machine_name.to_string());
                     println!("added {machine_name} ({machine_id})");
                 }
                 Ok(())
-            }
+            },
+            _ => Err(LoginError.into())
         }
     }
 }
@@ -181,7 +186,7 @@ impl SpeidelClient {
         Ok(SpeidelClient {
             username,
             password,
-            machines: HashMap::new(),
+            machines: Machines(HashMap::new()),
             http_client: client,
         })
     }
@@ -204,9 +209,12 @@ impl SpeidelClient {
 
         match index.url().path() {
             "/auth/login" => panic!("Username or password is incorrect"),
-            "/myspeidel/index" => self.machines.from_resp(index),
+            "/myspeidel/index" => {
+                self.machines.from_resp(index);
+                self.machines.build(self.http_client)
+            },
             _ => panic!("Unable to login for an unknown reason: {:?}", index),
-        }
+        };
 
         Ok(())
     }
@@ -248,9 +256,9 @@ fn main() {
 
     let mut machine_id = String::new();
     let mut api_token = String::new();
-    for (k, v) in s.machines.iter() {
+    for (k, v) in s.machines.0.iter() {
         machine_id = k.to_string();
-        api_token = v.api_token.to_string();
+        api_token = v.api_token.as_ref().expect("API token missing").to_string();
     }
 
     let mut topics = vec![];
