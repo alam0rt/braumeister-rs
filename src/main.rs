@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::error;
 use std::fmt;
 use std::{env, process, time::Duration};
+use prometheus::{Opts, Registry, Counter, TextEncoder, Encoder, Gauge, labels};
 
 // Stat seems to mean status, tele I have no idea and cmnd is command
 // Once a topic is subscribed to, you need to publish to the relevant "cmnd"
@@ -39,17 +40,17 @@ struct BrewingState {
     version: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")] // for some reason the status data is returned in camelCase
 struct Status {
     device_state: String,
     full_tilt_information: Vec<String>,
     heating: u8,
     pump: u8,
-    pump_speed: Option<f32>,
-    sensor_pressure: Option<f32>,
-    target_temperature: Option<f32>,
-    temperature: Option<f32>,
+    pump_speed: Option<f64>,
+    sensor_pressure: Option<f64>,
+    target_temperature: Option<f64>,
+    temperature: Option<f64>,
     version: String,
 }
 
@@ -74,7 +75,9 @@ struct SpeidelClient {
 struct Machine {
     api_token: Option<String>,
     name: String,
+    status: Option<Status>,
 }
+
 
 struct Machines(HashMap<u64, Machine>);
 
@@ -102,6 +105,17 @@ impl fmt::Display for UnknownError {
     }
 }
 
+impl Machine {
+    fn new(name: String) -> Machine {
+	Machine { api_token: None, name, status: None }
+    }
+
+    fn update(&mut self, status: Status) {
+	self.status = Some(status);
+    }
+	
+}
+
 impl Machines {
     fn new() -> Machines {
         Machines {
@@ -110,11 +124,7 @@ impl Machines {
     }
     fn add_machine(&mut self, id: u64, name: String) {
         self.0.insert(
-            id,
-            Machine {
-                api_token: None,
-                name,
-            },
+            id, Machine::new(name)
         );
     }
 
@@ -188,6 +198,15 @@ impl BrewingState {
     }
 }
 
+impl Status {
+    fn new(value: serde_json::Value) -> Result<Status> {
+	let result: Status = serde_json::from_str(value["body"].to_string().as_str())?;
+	Ok(result)
+    }
+}
+
+
+
 impl SpeidelClient {
     fn new(username: String, password: String) -> Result<SpeidelClient> {
         let client = match reqwest::blocking::ClientBuilder::new()
@@ -238,6 +257,12 @@ impl SpeidelClient {
 fn main() {
     // Initialize the logger from the environment
     env_logger::init();
+
+    let temperature_gauge_opts = Opts::new("temperature_gauge", "display the temperature of the kettle");
+    let temperature = Gauge::with_opts(temperature_gauge_opts).unwrap();
+
+    let r = Registry::new();
+    r.register(Box::new(temperature.clone())).unwrap();
 
     let host = env::args()
         .nth(1)
@@ -364,6 +389,9 @@ fn main() {
                     "braumeister/status" => {
                         let m: Status =
                             serde_json::from_str(p["body"].to_string().as_str()).unwrap();
+
+			temperature.set(m.temperature.unwrap());
+			
                         println!("{:?}", m);
                     }
                     "braumeister/config" => {
@@ -379,6 +407,14 @@ fn main() {
                         println!("received unknown topic: {}", unknown);
                     }
                 }
+
+		let mut buffer = vec![];
+		let encoder = TextEncoder::new();
+		let metric_families = r.gather();
+		encoder.encode(&metric_families, &mut buffer).unwrap();
+
+		// Output to the standard output.
+		println!("{}", String::from_utf8(buffer).unwrap());
             } else {
                 // A "None" means we were disconnected. Try to reconnect...
                 println!("Lost connection. Attempting reconnect.");
