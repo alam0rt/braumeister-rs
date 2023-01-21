@@ -19,6 +19,21 @@ const PREFIX: &[&str] = &["stat", "tele", "cmnd"];
 // The topics to which we subscribe.
 const TOPICS: &[&str] = &["machineinfo", "status", "config", "brewing/state"];
 
+enum HeatingState {
+    Undefined,
+    Off,
+    Heating,
+    Break,
+    Blocked,
+}
+
+enum PumpState {
+    Undefined,
+    Off,
+    Pumping, // TODO: double check states
+    On,
+}
+
 #[derive(Deserialize, Debug)]
 struct MachineInfo {
     firmware: String,
