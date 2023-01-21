@@ -16,7 +16,7 @@ use std::{env, process, time::Duration};
 const PREFIX: &[&str] = &["stat", "tele", "cmnd"];
 
 // The topics to which we subscribe.
-const TOPICS: &[&str] = &["machineinfo", "status", "config"];
+const TOPICS: &[&str] = &["machineinfo", "status", "config", "brewing/state"];
 
 #[derive(Deserialize, Debug)]
 struct MachineInfo {
@@ -28,6 +28,15 @@ struct MachineInfo {
     timezone: String,
     voltage: String,
     volume: u8,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")] 
+struct BrewingState {
+    current_progress: u32,
+    remaining_time: u32,
+    total_progress: u32,
+    version: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -82,6 +91,17 @@ impl fmt::Display for LoginError {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UnknownError;
+
+impl error::Error for UnknownError {}
+
+impl fmt::Display for UnknownError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "An unknown error occurred")
+    }
+}
+
 impl Machines {
     fn new() -> Machines {
         Machines {
@@ -124,8 +144,6 @@ impl Machines {
                 })
                 .collect();
 
-        println!("{:?}", bmv2control_data);
-
             for config in bmv2control_data.iter() {
                 machine.api_token = Some(config["apiAuthToken"]
                     .to_string()
@@ -147,20 +165,26 @@ impl Machines {
                 {
                     let machine_id: u64 = machine
                         .attr("data-machine-id")
-                        .ok_or::<LoginError>(LoginError.into())?
+                        .ok_or::<UnknownError>(UnknownError.into())?
                         .parse::<u64>()?;
 
                     let machine_name = machine
                         .attr("data-machine-name")
-                        .ok_or::<LoginError>(LoginError.into())?;
+                        .ok_or::<UnknownError>(UnknownError.into())?;
 
                     self.add_machine(machine_id, machine_name.to_string());
                     println!("added {machine_name} ({machine_id})");
                 }
                 Ok(())
             },
-            _ => Err(LoginError.into())
+            _ => Err(UnknownError.into())
         }
+    }
+}
+impl BrewingState {
+    fn new(value: serde_json::Value) -> Result<BrewingState> {
+	let result: BrewingState = serde_json::from_str(value["body"].to_string().as_str())?;
+	Ok(result)
     }
 }
 
@@ -172,7 +196,7 @@ impl SpeidelClient {
             .build()
         {
             Ok(client) => client,
-            Err(error) => panic!("Problem creating HTTP client: {:?}", error),
+            Err(error) => return Err(error.into()),
         };
 
         Ok(SpeidelClient {
@@ -200,15 +224,14 @@ impl SpeidelClient {
             .unwrap();
 
         match index.url().path() {
-            "/auth/login" => panic!("Username or password is incorrect"),
+            "/auth/login" => return Err(LoginError.into()),
             "/myspeidel/index" => {
                 self.machines.from_resp(index).expect("unable to retrieve machines");
                 self.machines.build(self.http_client.clone()).expect("unable to retrieve API token");
+		return Ok(());
             },
-            _ => panic!("Unable to login for an unknown reason: {:?}", index),
+            _ => return Err(LoginError.into()),
         };
-
-        Ok(())
     }
 }
 
@@ -336,18 +359,22 @@ fn main() {
                     "braumeister/machineinfo" => {
                         let m: MachineInfo =
                             serde_json::from_str(p["body"].to_string().as_str()).unwrap();
-                        print!("{:?}", m);
+                        println!("{:?}", m);
                     }
                     "braumeister/status" => {
                         let m: Status =
                             serde_json::from_str(p["body"].to_string().as_str()).unwrap();
-                        print!("{:?}", m);
+                        println!("{:?}", m);
                     }
                     "braumeister/config" => {
                         let m: Config =
                             serde_json::from_str(p["body"].to_string().as_str()).unwrap();
-                        print!("{:?}", m);
+                        println!("{:?}", m);
                     }
+		    "braumeister/brewing/state" => {
+			let m = BrewingState::new(p).unwrap();
+			println!("{:?}", m);
+		    }
                     unknown => {
                         println!("received unknown topic: {}", unknown);
                     }
