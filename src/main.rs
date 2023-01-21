@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::error;
 use std::fmt;
 use std::{env, process, time::Duration};
-use prometheus::{Opts, Registry, Counter, TextEncoder, Encoder, Gauge, labels};
+use prometheus::{Opts, Registry, Counter, TextEncoder, Encoder, Gauge, labels, GaugeVec};
 
 // Stat seems to mean status, tele I have no idea and cmnd is command
 // Once a topic is subscribed to, you need to publish to the relevant "cmnd"
@@ -23,7 +23,7 @@ const TOPICS: &[&str] = &["machineinfo", "status", "config", "brewing/state"];
 struct MachineInfo {
     firmware: String,
     frequency: String,
-    heatings: u32,
+    heating: u32,
     machineid: String,
     machinetype: String,
     timezone: String,
@@ -44,7 +44,7 @@ struct BrewingState {
 #[serde(rename_all = "camelCase")] // for some reason the status data is returned in camelCase
 struct Status {
     device_state: String,
-    full_tilt_information: Vec<String>,
+    full_tilt_information: Option<Vec<String>>,
     heating: u8,
     pump: u8,
     pump_speed: Option<f64>,
@@ -76,6 +76,7 @@ struct Machine {
     api_token: Option<String>,
     name: String,
     status: Option<Status>,
+    temperature_gauge: Option<Gauge>,
 }
 
 
@@ -105,9 +106,10 @@ impl fmt::Display for UnknownError {
     }
 }
 
+
 impl Machine {
     fn new(name: String) -> Machine {
-	Machine { api_token: None, name, status: None }
+	Machine { api_token: None, name, status: None, temperature_gauge: None }
     }
 
     fn update(&mut self, status: Status) {
@@ -192,15 +194,15 @@ impl Machines {
     }
 }
 impl BrewingState {
-    fn new(value: serde_json::Value) -> Result<BrewingState> {
-	let result: BrewingState = serde_json::from_str(value["body"].to_string().as_str())?;
+    fn new(value: &str) -> Result<BrewingState> {
+	let result: BrewingState = serde_json::from_str(value)?;
 	Ok(result)
     }
 }
 
 impl Status {
-    fn new(value: serde_json::Value) -> Result<Status> {
-	let result: Status = serde_json::from_str(value["body"].to_string().as_str())?;
+    fn new(value: &str) -> Result<Status> {
+	let result: Status = serde_json::from_str(value)?;
 	Ok(result)
     }
 }
@@ -253,16 +255,36 @@ impl SpeidelClient {
         };
     }
 }
+fn machine_id_from_topic(topic: &str) -> Result<u64> {
+    let s = match topic.split('/').into_iter().nth(1) {
+	None => return Err(UnknownError.into()),
+	Some(p) => p,
+    };
+
+    match s.parse::<u64>() {
+	Err(e) => Err(e.into()),
+	Ok(id) => Ok(id),
+    }
+}
 
 fn main() {
     // Initialize the logger from the environment
     env_logger::init();
 
-    let temperature_gauge_opts = Opts::new("temperature_gauge", "display the temperature of the kettle");
-    let temperature = Gauge::with_opts(temperature_gauge_opts).unwrap();
+
+    let temperature_opts = Opts::new("temperature_gauge", "temperature of the brew kettle");
+    let temperature_gauges = GaugeVec::new(temperature_opts, &["id", "name"]).unwrap();
+
+    let target_temperature_opts = Opts::new("target_temperature_gauge", "target temperature of the brew kettle");
+    let target_temperature_gauges = GaugeVec::new(target_temperature_opts, &["id", "name"]).unwrap();
+
+    let device_info_opts = Opts::new("device_info", "information about machines");
+    let device_info = GaugeVec::new(device_info_opts, &["firmware", "frequency", "heating", "id", "type", "timezone", "voltage", "volume"]).unwrap();
 
     let r = Registry::new();
-    r.register(Box::new(temperature.clone())).unwrap();
+    r.register(Box::new(temperature_gauges.clone())).unwrap();
+    r.register(Box::new(target_temperature_gauges.clone())).unwrap();
+    r.register(Box::new(device_info.clone())).unwrap();
 
     let host = env::args()
         .nth(1)
@@ -380,27 +402,90 @@ fn main() {
                         continue;
                     }
                 };
-                match p["topic"].as_str().unwrap() {
+
+		let topic = match p["topic"].as_str() {
+		    Some(v) => v,
+		    None => {
+			println!("Unable to find topic in message");
+			continue;
+		    }
+		};
+
+		let body = match Some(p["body"].to_string()) {
+		    Some(v) => v,
+		    None => {
+			println!("Unable to find body in message");
+			continue;
+		    }
+		};
+
+
+		let machine_id = match machine_id_from_topic(msg.topic().to_string().as_str()) {
+		    Ok(v) => v,
+		    Err(e) => {
+			println!("Unable to find machine id in topic {topic}: {:?}", e); 
+			continue;
+		    }
+		};
+
+
+                match topic {
                     "braumeister/machineinfo" => {
                         let m: MachineInfo =
-                            serde_json::from_str(p["body"].to_string().as_str()).unwrap();
+                            serde_json::from_str(body.as_str()).unwrap();
+
+			match s.machines.0.get(&machine_id) {
+			    Some(_) => {
+				let id = machine_id.to_string();
+				let heating = m.heating.to_string();
+				let volume = m.volume.to_string();
+				device_info.with(&labels!{
+				    "id" => id.as_str(),
+				    "firmware" => m.firmware.as_str(),
+				    "timezone" => m.timezone.as_str(),
+				    "frequency" => m.frequency.as_str(),
+				    "heating" => heating.as_str(),
+				    "type" => m.machinetype.as_str(),
+				    "voltage" => m.voltage.as_str(),
+				    "volume" => volume.as_str(),
+				    
+				}).set(1.0);
+			    },
+			    None => {
+				println!("machine not found!");
+				continue;
+			    }
+			}
                         println!("{:?}", m);
                     }
                     "braumeister/status" => {
-                        let m: Status =
-                            serde_json::from_str(p["body"].to_string().as_str()).unwrap();
-
-			temperature.set(m.temperature.unwrap());
+			let m = Status::new(body.as_str()).unwrap();
+			match s.machines.0.get(&machine_id) {
+			    Some(v) => {
+				let id = machine_id.to_string();
+				let labels = labels!{
+				    "id" => id.as_str(),
+				    "name" => v.name.as_str(),
+				};
+				temperature_gauges.with(&labels).set(m.temperature.unwrap());
+				target_temperature_gauges.with(&labels).set(m.target_temperature.unwrap());
+			    },
+			    None => {
+				println!("machine not found!");
+				continue;
+			    },
+			}
+			
 			
                         println!("{:?}", m);
                     }
                     "braumeister/config" => {
                         let m: Config =
-                            serde_json::from_str(p["body"].to_string().as_str()).unwrap();
+                            serde_json::from_str(body.as_str()).unwrap();
                         println!("{:?}", m);
                     }
 		    "braumeister/brewing/state" => {
-			let m = BrewingState::new(p).unwrap();
+			let m = BrewingState::new(body.as_str()).unwrap();
 			println!("{:?}", m);
 		    }
                     unknown => {
