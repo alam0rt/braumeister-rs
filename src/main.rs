@@ -226,38 +226,33 @@ impl Status {
 
 impl SpeidelClient {
     fn new(username: String, password: String) -> Result<SpeidelClient> {
-        let client = match reqwest::blocking::ClientBuilder::new()
+        let client = reqwest::blocking::ClientBuilder::new()
             .cookie_store(true)
             .gzip(true)
-            .build()
-        {
-            Ok(client) => client,
-            Err(error) => return Err(error.into()),
-        };
+            .build()?;
 
-        Ok(SpeidelClient {
-            username,
-            password,
-            machines: Machines(HashMap::new()),
-            http_client: client,
-        })
+        Ok(
+	    SpeidelClient {
+		username,
+		password,
+		machines: Machines(HashMap::new()),
+		http_client: client,
+            }
+	)
     }
 
     fn login(&mut self) -> Result<()> {
         let params = [("identity", &self.username), ("password", &self.password)];
 
-
         self.http_client
             .post("https://www.myspeidel.com/auth/login")
             .form(&params)
-            .send()
-            .unwrap();
+            .send()?;
 
         let index = self
             .http_client
             .get("https://www.myspeidel.com/myspeidel/index")
-            .send()
-            .unwrap();
+            .send()?;
 
         match index.url().path() {
             "/auth/login" => return Err(LoginError.into()),
@@ -271,10 +266,9 @@ impl SpeidelClient {
     }
 }
 fn machine_id_from_topic(topic: &str) -> Result<u64> {
-    let s = match topic.split('/').into_iter().nth(1) {
-	None => return Err(UnknownError.into()),
-	Some(p) => p,
-    };
+    // machine id is the second element of a topic
+    let s = topic.split('/').into_iter().nth(1)
+	.ok_or("unable to get machine id")?;
 
     match s.parse::<u64>() {
 	Err(e) => Err(e.into()),
